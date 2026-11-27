@@ -20,6 +20,7 @@ protocol OrderRepository: AnyObject {
 
     /// Claims a placed order for a courier. Must be atomic: when two couriers accept
     /// the same order, exactly one succeeds and the other gets `OrderError.alreadyTaken`.
+    /// A cancelled order throws `OrderError.noLongerAvailable`.
     func accept(orderID: String, courier: AppUser) async throws -> Order
 
     /// Moves an order along `OrderStatus`; acceptance must go through `accept` instead.

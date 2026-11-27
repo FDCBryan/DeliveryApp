@@ -1,21 +1,32 @@
 import SwiftUI
 
-/// Live view of one order, shared by both roles. Customers can cancel while it's
-/// still placed; courier actions (accept, picked up, delivered) arrive in M3.
+/// Live view of one order, shared by both roles.
+/// Customers can cancel while it's still placed. Couriers get one action button at the
+/// bottom for their next step: accept, then picked up, then delivered.
 struct OrderDetailView: View {
     let orderID: String
+    /// Called after this courier accepts the order (e.g. to switch to the Active tab).
+    var onAccepted: (() -> Void)?
 
     @Environment(AppSession.self) private var session
     @State private var order: Order?
     @State private var hasLoaded = false
     @State private var isConfirmingCancel = false
-    @State private var isCancelling = false
-    @State private var actionError: String?
+    @State private var isConfirmingDelivery = false
+    @State private var isWorking = false
+    @State private var actionAlert: ActionAlert?
+
+    private struct ActionAlert: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
 
     var body: some View {
         Group {
             if let order {
                 content(order)
+                    .safeAreaInset(edge: .bottom) { courierActionBar(order) }
             } else if hasLoaded {
                 ContentUnavailableView("Order not found", systemImage: "questionmark.folder")
             } else {
@@ -36,10 +47,22 @@ struct OrderDetailView: View {
         } message: {
             Text("You can cancel until a courier accepts it.")
         }
-        .alert("Couldn't cancel", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
-            Button("OK", role: .cancel) {}
+        .confirmationDialog("Complete delivery?", isPresented: $isConfirmingDelivery, titleVisibility: .visible) {
+            Button("Cash collected, mark delivered") { advance(to: .delivered) }
+            Button("Not yet", role: .cancel) {}
         } message: {
-            Text(actionError ?? "")
+            if let order {
+                Text("Collect \(Money.format(order.total)) in cash from \(order.customerName) before confirming.")
+            }
+        }
+        .alert(
+            actionAlert?.title ?? "",
+            isPresented: Binding(get: { actionAlert != nil }, set: { if !$0 { actionAlert = nil } }),
+            presenting: actionAlert
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { alert in
+            Text(alert.message)
         }
     }
 
@@ -68,8 +91,8 @@ struct OrderDetailView: View {
             }
 
             Section("Delivery") {
-                LabeledContent("Pick up", value: "\(order.storeName), \(order.storeAddress.line)")
-                LabeledContent("Drop off", value: order.deliveryAddress.line)
+                addressRow(title: "Pick up", detail: "\(order.storeName), \(order.storeAddress.line)", mapsQuery: order.storeAddress.line)
+                addressRow(title: "Drop off", detail: order.deliveryAddress.line, mapsQuery: order.deliveryAddress.line)
                 if let note = order.deliveryAddress.note {
                     LabeledContent("Note", value: note)
                 }
@@ -77,14 +100,16 @@ struct OrderDetailView: View {
             }
 
             Section("Contact") {
-                if isCustomerView {
-                    if let courierName = order.courierName {
-                        contactRow(title: "Courier", name: courierName, phone: order.courierPhone)
+                if isCourierView {
+                    if order.courierID == session.user?.id {
+                        contactRow(title: "Customer", name: order.customerName, phone: order.customerPhone)
                     } else {
-                        LabeledContent("Courier", value: order.status == .cancelled ? "None" : "Waiting for a courier…")
+                        LabeledContent("Customer", value: "Shown after you accept")
                     }
+                } else if let courierName = order.courierName {
+                    contactRow(title: "Courier", name: courierName, phone: order.courierPhone)
                 } else {
-                    contactRow(title: "Customer", name: order.customerName, phone: order.customerPhone)
+                    LabeledContent("Courier", value: order.status == .cancelled ? "None" : "Waiting for a courier…")
                 }
             }
 
@@ -95,13 +120,13 @@ struct OrderDetailView: View {
                     } label: {
                         HStack {
                             Text("Cancel order")
-                            if isCancelling {
+                            if isWorking {
                                 Spacer()
                                 ProgressView()
                             }
                         }
                     }
-                    .disabled(isCancelling)
+                    .disabled(isWorking)
                 } footer: {
                     Text("You can cancel until a courier accepts the order.")
                 }
@@ -119,12 +144,131 @@ struct OrderDetailView: View {
     }
 }
 
-extension OrderDetailView {
-    private var isCustomerView: Bool { session.user?.role != .courier }
+// MARK: - Courier actions
 
+extension OrderDetailView {
+    private var isCourierView: Bool { session.user?.role == .courier }
+
+    private func nextStep(for order: Order) -> OrderStatus? {
+        guard let user = session.user, user.role == .courier else { return nil }
+        return order.nextCourierStep(for: user.id)
+    }
+
+    @ViewBuilder
+    private func courierActionBar(_ order: Order) -> some View {
+        if let step = nextStep(for: order) {
+            Button {
+                switch step {
+                case .accepted: accept()
+                case .delivered: isConfirmingDelivery = true
+                default: advance(to: step)
+                }
+            } label: {
+                HStack {
+                    if isWorking {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: Self.symbol(for: step))
+                    }
+                    Text(Self.title(for: step))
+                    Spacer()
+                    if step == .delivered {
+                        Text(Money.format(order.total)).monospacedDigit()
+                    }
+                }
+                .font(.headline)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                .background(Brand.red, in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .disabled(isWorking)
+            .padding(.horizontal)
+            .padding(.vertical, 10)
+            .background(.bar)
+        }
+    }
+
+    private static func title(for step: OrderStatus) -> String {
+        switch step {
+        case .accepted: "Accept order"
+        case .pickedUp: "Picked up from store"
+        case .delivered: "Delivered"
+        default: step.title
+        }
+    }
+
+    private static func symbol(for step: OrderStatus) -> String {
+        switch step {
+        case .accepted: "hand.raised.fill"
+        case .pickedUp: "bag.fill"
+        case .delivered: "checkmark.seal.fill"
+        default: "arrow.right"
+        }
+    }
+
+    private func accept() {
+        run(failureTitle: "Couldn't accept") {
+            _ = try await session.acceptOrder(id: orderID)
+            onAccepted?()
+        }
+    }
+
+    private func advance(to status: OrderStatus) {
+        run(failureTitle: "Couldn't update the order") {
+            _ = try await session.advanceDelivery(id: orderID, to: status)
+        }
+    }
+}
+
+// MARK: - Customer actions and shared helpers
+
+extension OrderDetailView {
     private func canCancel(_ order: Order) -> Bool {
         guard let user = session.user, user.id == order.customerID else { return false }
         return order.status.canTransition(to: .cancelled, by: user.role)
+    }
+
+    private func cancel() {
+        run(failureTitle: "Couldn't cancel") {
+            try await session.cancelOrder(id: orderID)
+        }
+    }
+
+    private func run(failureTitle: String, _ action: @escaping () async throws -> Void) {
+        guard !isWorking else { return }
+        isWorking = true
+        Task {
+            defer { isWorking = false }
+            do {
+                try await action()
+            } catch {
+                actionAlert = ActionAlert(title: failureTitle, message: error.localizedDescription)
+            }
+        }
+    }
+
+    private func addressRow(title: String, detail: String, mapsQuery: String) -> some View {
+        LabeledContent(title) {
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(detail)
+                    .multilineTextAlignment(.trailing)
+                if isCourierView, let url = Self.mapsURL(for: mapsQuery) {
+                    Link(destination: url) {
+                        Label("Directions", systemImage: "arrow.triangle.turn.up.right.diamond.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Brand.red)
+                    }
+                }
+            }
+        }
+    }
+
+    private static func mapsURL(for address: String) -> URL? {
+        var components = URLComponents(string: "https://maps.apple.com/")
+        components?.queryItems = [URLQueryItem(name: "daddr", value: address)]
+        return components?.url
     }
 
     private func contactRow(title: String, name: String, phone: String?) -> some View {
@@ -140,18 +284,6 @@ extension OrderDetailView {
                     }
                     .accessibilityLabel("Call \(name)")
                 }
-            }
-        }
-    }
-
-    private func cancel() {
-        isCancelling = true
-        Task {
-            defer { isCancelling = false }
-            do {
-                try await session.cancelOrder(id: orderID)
-            } catch {
-                actionError = error.localizedDescription
             }
         }
     }
@@ -178,9 +310,16 @@ struct StatusTimeline: View {
     }
 }
 
-#Preview {
+#Preview("Customer") {
     NavigationStack {
         OrderDetailView(orderID: "order-1001")
     }
     .environment(AppSession.mock(signedInAs: MockData.customer))
+}
+
+#Preview("Courier") {
+    NavigationStack {
+        OrderDetailView(orderID: "order-1002")
+    }
+    .environment(AppSession.mock(signedInAs: MockData.courier))
 }

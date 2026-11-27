@@ -43,6 +43,17 @@ nonisolated struct Order: Identifiable, Codable, Hashable, Sendable {
 
     var itemCount: Int { items.reduce(0) { $0 + $1.quantity } }
 
+    /// The next status this courier can move the order to, or nil if there's nothing for them to do:
+    /// accept an unassigned placed order, then picked up, then delivered (their own orders only).
+    func nextCourierStep(for courierID: String) -> OrderStatus? {
+        switch status {
+        case .placed where self.courierID == nil: .accepted
+        case .accepted where self.courierID == courierID: .pickedUp
+        case .pickedUp where self.courierID == courierID: .delivered
+        default: nil
+        }
+    }
+
     /// Builds a new order, validating the input and computing the totals.
     static func new(
         id: String,
@@ -89,6 +100,7 @@ nonisolated enum OrderError: Error, Equatable, LocalizedError {
     case emptyOrder
     case missingAddress
     case alreadyTaken
+    case noLongerAvailable
     case courierBusy
     case invalidTransition(from: OrderStatus, to: OrderStatus)
 
@@ -100,6 +112,7 @@ nonisolated enum OrderError: Error, Equatable, LocalizedError {
         case .emptyOrder: "Add at least one item."
         case .missingAddress: "Enter a delivery address."
         case .alreadyTaken: "Another courier already took this order."
+        case .noLongerAvailable: "This order is no longer available."
         case .courierBusy: "Finish your current delivery first."
         case let .invalidTransition(from, to): "An order can't go from \(from.title) to \(to.title)."
         }

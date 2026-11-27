@@ -33,7 +33,8 @@ final class InMemoryOrderRepository: OrderRepository {
     func accept(orderID: String, courier: AppUser) async throws -> Order {
         guard courier.role == .courier else { throw OrderError.notAllowed }
         guard var order = orders[orderID] else { throw OrderError.notFound }
-        guard order.status == .placed, order.courierID == nil else { throw OrderError.alreadyTaken }
+        guard order.courierID == nil else { throw OrderError.alreadyTaken }
+        guard order.status == .placed else { throw OrderError.noLongerAvailable }
         let hasActiveDelivery = orders.values.contains { $0.courierID == courier.id && $0.status.isActive }
         guard !hasActiveDelivery else { throw OrderError.courierBusy }
 

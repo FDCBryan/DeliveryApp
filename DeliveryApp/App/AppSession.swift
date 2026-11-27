@@ -47,6 +47,18 @@ final class AppSession {
         return order
     }
 
+    /// Courier claims a placed order. Throws `OrderError.alreadyTaken` if another courier got it first.
+    func acceptOrder(id: String) async throws -> Order {
+        guard let user, user.role == .courier else { throw OrderError.notAllowed }
+        return try await orders.accept(orderID: id, courier: user)
+    }
+
+    /// Courier moves their order to picked up or delivered.
+    func advanceDelivery(id: String, to status: OrderStatus) async throws -> Order {
+        guard let user, user.role == .courier else { throw OrderError.notAllowed }
+        return try await orders.updateStatus(orderID: id, to: status, by: user)
+    }
+
     /// Customer cancels their own order; only allowed while it's still `placed`.
     func cancelOrder(id: String) async throws {
         guard let user else { throw OrderError.notAllowed }
